@@ -1,0 +1,374 @@
+"""
+src/features/ssi.py
+────────────────────
+Compute the Compound Sustainability Stress Index (SSI) per H3 hex per month.
+
+Inputs: 5 normalized indicator columns
+  - heat_stress_idx
+  - water_stress_idx
+  - pollution_idx
+  - vegetation_idx
+  - urban_vulnerability_idx
+
+Formula:
+  SSI = Σ (weight_i × indicator_i)   (normalized to 0–1)
+
+Weighting:
+  1. PCA-based global weights (PC1 loadings across all cities)
+  2. City-specific multipliers applied on top of PCA weights
+
+Final output columns added:
+  - ssi_value     : Composite score, 0–1
+  - ssi_band      : Categorical label ['Low', 'Moderate', 'High', 'Extreme']
+  - archetype_id  : k-means cluster (1–6) based on indicator profile
+  - anomaly_flag  : True if ssi_value > city-level 90th percentile
+"""
+
+from __future__ import annotations
+
+import numpy as np
+import pandas as pd
+from typing import Optional
+
+from src.utils.config_loader import load_config
+from src.utils.logger import get_logger
+
+log = get_logger(__name__)
+
+INDICATOR_COLS = [
+    "heat_stress_idx",
+    "water_stress_idx",
+    "pollution_idx",
+    "vegetation_idx",
+    "urban_vulnerability_idx",
+]
+
+# Default equal weights (fallback if PCA fails)
+DEFAULT_WEIGHTS = {col: 1.0 / len(INDICATOR_COLS) for col in INDICATOR_COLS}
+
+
+def compute_pca_weights(
+    df: pd.DataFrame,
+    indicator_cols: list[str] = INDICATOR_COLS,
+) -> dict[str, float]:
+    """
+    Derive indicator weights from PC1 loadings of PCA on the indicator matrix.
+
+    Method:
+      1. Drop NaN rows from the indicator matrix.
+      2. Standardize columns to zero-mean, unit-variance.
+      3. Fit PCA.
+      4. PC1 loadings are used as weights (absolute values, re-normalized to sum=1).
+
+    Args:
+        df            : Panel DataFrame with indicator columns.
+        indicator_cols: List of indicator column names.
+
+    Returns:
+        Dict mapping indicator name → weight (summing to 1.0).
+    """
+    try:
+        from sklearn.decomposition import PCA
+        from sklearn.preprocessing import StandardScaler
+    except ImportError as exc:
+        log.warning("scikit-learn not available; using equal weights.")
+        raise exc
+
+    # Use only rows where all indicators are present
+    available_cols = [c for c in indicator_cols if c in df.columns]
+    sub = df[available_cols].dropna()
+
+    if len(sub) < 30:
+        log.warning(
+            "Too few complete rows ({n}) for PCA. Using equal weights.",
+            n=len(sub)
+        )
+        return {col: 1.0 / len(available_cols) for col in available_cols}
+
+    scaler = StandardScaler()
+    X = scaler.fit_transform(sub)
+
+    pca = PCA(n_components=1)
+    pca.fit(X)
+
+    loadings = np.abs(pca.components_[0])  # PC1 absolute loadings
+    weights_raw = loadings / loadings.sum()
+
+    weights = {col: float(w) for col, w in zip(available_cols, weights_raw)}
+    explained = pca.explained_variance_ratio_[0] * 100
+
+    log.info(
+        "PCA weights computed (PC1 explains {pct:.1f}% variance): {w}",
+        pct=explained,
+        w={k: f"{v:.3f}" for k, v in weights.items()},
+    )
+    return weights
+
+
+def apply_city_weight_adjustments(
+    weights: dict[str, float],
+    city: str,
+    config: Optional[dict] = None,
+) -> dict[str, float]:
+    """
+    Apply city-specific weight multipliers from config.yml.
+
+    City multipliers are applied multiplicatively, then re-normalized.
+
+    Args:
+        weights: Base weights dict (from PCA or equal).
+        city   : City slug.
+        config : Config dict (loaded if None).
+
+    Returns:
+        Adjusted, normalized weights dict.
+    """
+    if config is None:
+        config = load_config()
+
+    city_adjustments = (
+        config.get("ssi", {})
+        .get("city_weights", {})
+        .get(city, {})
+    )
+
+    # Map config keys to column names
+    key_map = {
+        "heat_stress": "heat_stress_idx",
+        "water_stress": "water_stress_idx",
+        "pollution_exposure": "pollution_idx",
+        "vegetation": "vegetation_idx",
+        "urban_vulnerability": "urban_vulnerability_idx",
+    }
+
+    adjusted = dict(weights)
+
+    for config_key, multiplier in city_adjustments.items():
+        col = key_map.get(config_key, config_key)
+        if col in adjusted:
+            adjusted[col] *= multiplier
+            log.debug(
+                "City '{city}' weight adjustment: {k} × {m:.2f}",
+                city=city, k=col, m=multiplier,
+            )
+
+    # Re-normalize to sum = 1
+    total = sum(adjusted.values())
+    if total > 0:
+        adjusted = {k: v / total for k, v in adjusted.items()}
+
+    return adjusted
+
+
+def compute_ssi_value(
+    df: pd.DataFrame,
+    weights: dict[str, float],
+) -> pd.Series:
+    """
+    Compute the raw weighted sum SSI from indicator columns.
+
+    Args:
+        df     : Panel DataFrame with indicator columns.
+        weights: Dict of indicator → weight.
+
+    Returns:
+        pd.Series of raw SSI scores (not yet normalized to 0–1).
+    """
+    ssi_raw = pd.Series(0.0, index=df.index)
+
+    for col, w in weights.items():
+        if col in df.columns:
+            values = df[col].fillna(0.0)
+            ssi_raw += w * values
+
+    return ssi_raw
+
+
+def assign_ssi_band(
+    ssi_01: pd.Series,
+    thresholds: Optional[dict] = None,
+) -> pd.Series:
+    """
+    Assign SSI band labels based on thresholds.
+
+    Default thresholds (from config ssi.ssi_bands):
+      Low     : [0.00, 0.25)
+      Moderate: [0.25, 0.50)
+      High    : [0.50, 0.75)
+      Extreme : [0.75, 1.00]
+
+    Args:
+        ssi_01    : SSI values in 0–1.
+        thresholds: Override thresholds dict.
+
+    Returns:
+        pd.Series of string labels.
+    """
+    if thresholds is None:
+        config = load_config()
+        thresholds = config.get("ssi", {}).get("ssi_bands", {
+            "Low": [0.0, 0.25],
+            "Moderate": [0.25, 0.5],
+            "High": [0.5, 0.75],
+            "Extreme": [0.75, 1.0],
+        })
+
+    conditions = []
+    choices = []
+    for band, (lo, hi) in thresholds.items():
+        conditions.append((ssi_01 >= lo) & (ssi_01 < hi))
+        choices.append(band)
+
+    # Handle upper bound of Extreme
+    return pd.Series(
+        np.select(conditions, choices, default="Extreme"),
+        index=ssi_01.index,
+        name="ssi_band",
+    )
+
+
+def assign_archetypes(
+    df: pd.DataFrame,
+    indicator_cols: list[str] = INDICATOR_COLS,
+    k: int = 6,
+) -> pd.Series:
+    """
+    Cluster H3 hexes into stress archetypes using k-means on indicator space.
+
+    Clusters capture distinct compound stress profiles:
+    e.g. "Hot + Dry + No vegetation" vs "Humid + Flood-prone + Dense"
+
+    Args:
+        df            : Panel DataFrame.
+        indicator_cols: Columns to cluster on.
+        k             : Number of archetypes.
+
+    Returns:
+        pd.Series of integer cluster labels (1-indexed).
+    """
+    try:
+        from sklearn.cluster import KMeans
+        from sklearn.impute import SimpleImputer
+        from sklearn.preprocessing import StandardScaler
+    except ImportError:
+        log.warning("sklearn not available; archetype_id set to -1")
+        return pd.Series(-1, index=df.index, name="archetype_id")
+
+    available = [c for c in indicator_cols if c in df.columns]
+    X_raw = df[available].values.astype(float)
+
+    # Impute NaNs with column means
+    imputer = SimpleImputer(strategy="mean")
+    X = imputer.fit_transform(X_raw)
+
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+
+    km = KMeans(n_clusters=k, random_state=42, n_init=10)
+    labels = km.fit_predict(X_scaled)
+
+    return pd.Series(labels + 1, index=df.index, name="archetype_id")  # 1-indexed
+
+
+def assign_anomaly_flag(
+    ssi_01: pd.Series,
+    threshold_pct: float = 90.0,
+) -> pd.Series:
+    """
+    Flag rows where SSI exceeds the given percentile threshold.
+
+    Args:
+        ssi_01        : SSI values in 0–1.
+        threshold_pct : Percentile above which anomaly_flag = True.
+
+    Returns:
+        Boolean pd.Series.
+    """
+    threshold = np.nanpercentile(ssi_01.values, threshold_pct)
+    return pd.Series(
+        ssi_01 > threshold,
+        index=ssi_01.index,
+        name="anomaly_flag",
+    )
+
+
+def compute_ssi(
+    df: pd.DataFrame,
+    city: str,
+    use_pca_weights: bool = True,
+    baseline_years: int = 3,
+) -> pd.DataFrame:
+    """
+    Full SSI computation pipeline for a single city panel.
+
+    Steps:
+      1. Compute PCA-based base weights (or fall back to equal)
+      2. Apply city-specific weight adjustments
+      3. Compute weighted SSI raw score
+      4. Min-max normalize SSI to 0–1
+      5. Assign ssi_band, archetype_id, anomaly_flag
+
+    Args:
+        df              : Panel DataFrame (must already have indicator columns).
+        city            : City slug (for config lookups and logging).
+        use_pca_weights : If False, use equal weights.
+        baseline_years  : (unused here but documented for consistency).
+
+    Returns:
+        DataFrame with added columns: ssi_value, ssi_band, archetype_id, anomaly_flag.
+    """
+    log.info("Computing SSI for {city}…", city=city)
+
+    config = load_config()
+    df = df.copy()
+
+    available_indicators = [c for c in INDICATOR_COLS if c in df.columns]
+
+    if not available_indicators:
+        log.error("No indicator columns found; cannot compute SSI.")
+        df["ssi_value"] = np.nan
+        df["ssi_band"] = "Unknown"
+        df["archetype_id"] = -1
+        df["anomaly_flag"] = False
+        return df
+
+    # ── Step 1: Derive base weights ───────────────────────────────────────────
+    if use_pca_weights:
+        try:
+            base_weights = compute_pca_weights(df, available_indicators)
+        except Exception as exc:
+            log.warning("PCA failed ({err}); using equal weights.", err=exc)
+            base_weights = {c: 1.0 / len(available_indicators) for c in available_indicators}
+    else:
+        base_weights = {c: 1.0 / len(available_indicators) for c in available_indicators}
+
+    # ── Step 2: City-specific adjustments ────────────────────────────────────
+    adjusted_weights = apply_city_weight_adjustments(base_weights, city, config)
+
+    # ── Step 3: Weighted sum ──────────────────────────────────────────────────
+    ssi_raw = compute_ssi_value(df, adjusted_weights)
+
+    # ── Step 4: Normalize to 0–1 ──────────────────────────────────────────────
+    raw_min, raw_max = ssi_raw.min(), ssi_raw.max()
+    if raw_max - raw_min > 1e-9:
+        ssi_01 = (ssi_raw - raw_min) / (raw_max - raw_min)
+    else:
+        ssi_01 = pd.Series(0.0, index=ssi_raw.index)
+
+    df["ssi_value"] = ssi_01.clip(0, 1)
+
+    # ── Step 5: Derived columns ───────────────────────────────────────────────
+    k = config.get("ssi", {}).get("archetype_k", 6)
+    anomaly_pct = config.get("ssi", {}).get("anomaly_threshold_pct", 90)
+
+    df["ssi_band"] = assign_ssi_band(df["ssi_value"])
+    df["archetype_id"] = assign_archetypes(df, available_indicators, k=k)
+    df["anomaly_flag"] = assign_anomaly_flag(df["ssi_value"], anomaly_pct)
+
+    log.info(
+        "SSI complete for {city}: mean={m:.3f}, anomaly_rate={ar:.1%}",
+        city=city,
+        m=df["ssi_value"].mean(),
+        ar=df["anomaly_flag"].mean(),
+    )
+    return df
