@@ -100,14 +100,14 @@ def compute_building_metrics(
     bld_centroids["geometry"] = bld_proj.geometry.centroid
 
     joined = gpd.sjoin(
-        bld_centroids.reset_index(),
+        bld_centroids,
         h3_proj[["h3_index", "geometry"]],
-        how="left",
+        how="inner",
         predicate="within",
     )
 
     # Building count per hex
-    building_count = joined.groupby("h3_index")["index_left"].count()
+    building_count = joined.groupby("h3_index").size()
     density = (building_count / hex_areas).fillna(0.0)
     density.name = "building_density"
 

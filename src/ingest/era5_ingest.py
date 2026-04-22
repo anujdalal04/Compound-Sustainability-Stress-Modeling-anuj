@@ -126,7 +126,7 @@ def download_era5_month(
     }
 
     log.info(
-        "Downloading ERA5 {city} {year}-{month:02d}…",
+        "Downloading ERA5 {city} {year}-{month:02d}...",
         city=city,
         year=year,
         month=month,
@@ -139,8 +139,44 @@ def download_era5_month(
             request,
             str(nc_path),
         )
+
+        # CDS API v2 returns a ZIP containing two NetCDF files:
+        #   data_stream-oper_stepType-instant.nc  (t2m, d2m, u10, v10, swvl1, swvl2)
+        #   data_stream-oper_stepType-accum.nc    (tp, ssrd)
+        # Detect if the downloaded file is actually a ZIP and merge NetCDFs.
+        import zipfile as _zipfile
+        if _zipfile.is_zipfile(nc_path):
+            import tempfile, shutil
+            import xarray as xr
+
+            with _zipfile.ZipFile(nc_path) as zf:
+                nc_members = [m for m in zf.namelist() if m.endswith(".nc")]
+                tmp_dir = Path(tempfile.mkdtemp())
+                try:
+                    datasets = []
+                    for member in nc_members:
+                        extracted = tmp_dir / member
+                        zf.extract(member, tmp_dir)
+                        ds = xr.open_dataset(extracted, engine="netcdf4")
+                        datasets.append(ds)
+
+                    if datasets:
+                        merged = xr.merge(datasets, compat="override")
+                        # Save back as a proper NetCDF replacing the ZIP
+                        nc_path.unlink()
+                        merged.to_netcdf(str(nc_path))
+                        for ds in datasets:
+                            ds.close()
+                        merged.close()
+                        log.info(
+                            "ERA5 merged {n} NetCDF streams for {city} {year}-{month:02d}",
+                            n=len(datasets), city=city, year=year, month=month,
+                        )
+                finally:
+                    shutil.rmtree(tmp_dir, ignore_errors=True)
+
         log.success(
-            "ERA5 saved → {path}", path=nc_path
+            "ERA5 saved -> {path}", path=nc_path
         )
     except Exception as exc:
         log.error("ERA5 download failed: {err}", err=exc)

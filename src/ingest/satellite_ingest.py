@@ -116,13 +116,16 @@ def fetch_ndvi_month(
             )
             return None
 
-        # Load B04 and B08 at 10 m resolution
+        # Load B04 and B08 at 10 m resolution — rescale=False to avoid dtype conflict
+        # epsg=4326 forces a common CRS (Mumbai spans two UTM zones)
         stack = stackstac.stack(
             items,
             assets=["B04", "B08"],
             bounds_latlon=bbox_list,
-            resolution=10,
-            dtype="float32",
+            resolution=0.0001,   # ~10 m in degrees at Mumbai latitude
+            dtype="float64",
+            rescale=False,
+            epsg=4326,
         )
 
         b04 = stack.sel(band="B04").median(dim="time", skipna=True)
@@ -209,17 +212,19 @@ def fetch_lst_month(
             log.warning("No MODIS LST items for {city} {year}-{month:02d}", city=city, year=year, month=month)
             return None
 
-        # LST_Day_1km band; scale factor = 0.02, unit = Kelvin
+        # LST_Day_1km band; scale factor = 0.02, unit = Kelvin — rescale=False, apply manually
+        # epsg=4326 needed because MODIS tiles may lack CRS in STAC metadata
         stack = stackstac.stack(
             items,
             assets=["LST_Day_1km"],
             bounds_latlon=bbox_list,
-            resolution=1000,
-            dtype="float32",
+            resolution=0.01,   # ~1 km in degrees
+            dtype="float64",
+            rescale=False,
+            epsg=4326,
         )
-
         lst_k = stack.sel(band="LST_Day_1km").median(dim="time", skipna=True)
-        # Apply scale factor and convert K → °C
+        # Apply scale factor manually and convert K -> °C
         lst_c = lst_k * 0.02 - 273.15
         lst_c = lst_c.where(lst_c > -100)   # Mask invalid pixels
 

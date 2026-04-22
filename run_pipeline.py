@@ -58,28 +58,46 @@ def get_city_list(city_arg: str) -> list[str]:
 
 # ─── Phase Functions ──────────────────────────────────────────────────────────
 
-def run_ingest(city: str, bbox: dict, overwrite: bool) -> None:
+def run_ingest(
+    city: str,
+    bbox: dict,
+    overwrite: bool,
+    start_month: str | None = None,
+    end_month: str | None = None,
+) -> None:
     """Run data ingestion for a single city."""
     log.info("=== INGEST phase: {city} ===", city=city)
 
     # ERA5
     try:
         from src.ingest.era5_ingest import ingest_era5_city
-        ingest_era5_city(city, bbox, overwrite=overwrite)
+        ingest_era5_city(
+            city, bbox,
+            start_month=start_month, end_month=end_month,
+            overwrite=overwrite,
+        )
     except Exception as exc:
         log.error("ERA5 ingestion failed for {city}: {err}", city=city, err=exc)
 
     # Satellite
     try:
         from src.ingest.satellite_ingest import ingest_satellite_city
-        ingest_satellite_city(city, bbox, overwrite=overwrite)
+        ingest_satellite_city(
+            city, bbox,
+            start_month=start_month, end_month=end_month,
+            overwrite=overwrite,
+        )
     except Exception as exc:
         log.error("Satellite ingestion failed for {city}: {err}", city=city, err=exc)
 
     # PM2.5
     try:
         from src.ingest.pm25_ingest import ingest_pm25_city
-        ingest_pm25_city(city, bbox, overwrite=overwrite)
+        ingest_pm25_city(
+            city, bbox,
+            start_month=start_month, end_month=end_month,
+            overwrite=overwrite,
+        )
     except Exception as exc:
         log.error("PM2.5 ingestion failed for {city}: {err}", city=city, err=exc)
 
@@ -102,12 +120,19 @@ def run_process(
     city: str,
     panel: pd.DataFrame,
     synthetic: bool,
+    start_month: str | None = None,
+    end_month: str | None = None,
 ) -> pd.DataFrame:
     """Build the H3 × monthly panel (harmonize step)."""
     log.info("=== PROCESS / HARMONIZE phase: {city} ===", city=city)
 
     from src.process.harmonize import build_h3_panel
-    panel = build_h3_panel(city, synthetic=synthetic)
+    panel = build_h3_panel(
+        city,
+        synthetic=synthetic,
+        start_month=start_month,
+        end_month=end_month,
+    )
     return panel
 
 
@@ -260,11 +285,11 @@ def main(
 
         # ── Ingest ───────────────────────────────────────────────────────────
         if phase in ("ingest", "all") and not synthetic:
-            run_ingest(city_id, bbox, overwrite)
+            run_ingest(city_id, bbox, overwrite, start_month=start, end_month=end)
 
         # ── Process / Harmonize ───────────────────────────────────────────────
         if phase in ("process", "all"):
-            panel = run_process(city_id, panel, synthetic)
+            panel = run_process(city_id, panel, synthetic, start_month=start, end_month=end)
             if panel.empty:
                 log.error("Empty panel for {city}. Stopping.", city=city_id)
                 continue

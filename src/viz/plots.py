@@ -289,9 +289,8 @@ def plot_indicator_heatmap(df: pd.DataFrame) -> go.Figure:
         zmin=-1, zmax=1,
         showscale=True,
         colorbar={
-            "title": "r",
+            "title": {"text": "r", "font": {"color": _FONT_COL}},
             "tickfont": {"color": "#a0a0a0"},
-            "titlefont": {"color": _FONT_COL},
             "thickness": 14,
         },
     ))
@@ -335,9 +334,8 @@ def plot_seasonal_heatmap(df: pd.DataFrame) -> go.Figure:
         showscale=True,
         hovertemplate="<b>%{y} %{x}</b><br>SSI: %{z:.4f}<extra></extra>",
         colorbar={
-            "title": "SSI",
+            "title": {"text": "SSI", "font": {"color": _FONT_COL}},
             "tickfont": {"color": "#a0a0a0"},
-            "titlefont": {"color": _FONT_COL},
             "thickness": 14,
         },
     ))
@@ -484,9 +482,8 @@ def plot_vulnerability_scatter(df: pd.DataFrame) -> go.Figure:
         xaxis=_axis("Mean BPL Population (%)"),
         yaxis=_axis("Mean SSI Score"),
         coloraxis_colorbar={
-            "title": "Urban Vuln.",
+            "title": {"text": "Urban Vuln.", "font": {"color": _FONT_COL}},
             "tickfont": {"color": "#a0a0a0"},
-            "titlefont": {"color": _FONT_COL},
             "thickness": 14,
         },
     )

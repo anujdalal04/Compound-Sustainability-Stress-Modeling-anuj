@@ -70,17 +70,19 @@ def fetch_road_network(
         log.debug("Roads already cached: {p}", p=out_path)
         return out_path
 
-    log.info("Fetching OSM road network for {city}…", city=city)
+    log.info("Fetching OSM road network for {city}...", city=city)
 
     try:
         config = load_config()
         network_type = config.get("osm", {}).get("network_type", "drive")
 
+        # osmnx v2: graph_from_bbox takes (left, bottom, right, top)
+        bbox_tuple = (
+            bbox["min_lon"], bbox["min_lat"],
+            bbox["max_lon"], bbox["max_lat"],
+        )
         G = ox.graph_from_bbox(
-            north=bbox["max_lat"],
-            south=bbox["min_lat"],
-            east=bbox["max_lon"],
-            west=bbox["min_lon"],
+            bbox_tuple,
             network_type=network_type,
             retain_all=False,
         )
@@ -130,14 +132,16 @@ def fetch_buildings(
         log.debug("Buildings already cached: {p}", p=out_path)
         return out_path
 
-    log.info("Fetching OSM buildings for {city}…", city=city)
+    log.info("Fetching OSM buildings for {city}...", city=city)
 
     try:
+        # osmnx v2: features_from_bbox takes (left, bottom, right, top)
+        bbox_tuple = (
+            bbox["min_lon"], bbox["min_lat"],
+            bbox["max_lon"], bbox["max_lat"],
+        )
         buildings = ox.features_from_bbox(
-            north=bbox["max_lat"],
-            south=bbox["min_lat"],
-            east=bbox["max_lon"],
-            west=bbox["min_lon"],
+            bbox_tuple,
             tags={"building": True},
         )
 
@@ -185,19 +189,21 @@ def fetch_green_space(
         log.debug("Green space already cached: {p}", p=out_path)
         return out_path
 
-    log.info("Fetching OSM green space for {city}…", city=city)
+    log.info("Fetching OSM green space for {city}...", city=city)
 
     try:
         # Try each tag category and merge
         all_green = []
+        # osmnx v2: features_from_bbox takes (left, bottom, right, top)
+        bbox_tuple = (
+            bbox["min_lon"], bbox["min_lat"],
+            bbox["max_lon"], bbox["max_lat"],
+        )
         for tag_key, tag_values in GREEN_SPACE_TAGS.items():
             for val in tag_values:
                 try:
                     gdf = ox.features_from_bbox(
-                        north=bbox["max_lat"],
-                        south=bbox["min_lat"],
-                        east=bbox["max_lon"],
-                        west=bbox["min_lon"],
+                        bbox_tuple,
                         tags={tag_key: val},
                     )
                     if not gdf.empty:
