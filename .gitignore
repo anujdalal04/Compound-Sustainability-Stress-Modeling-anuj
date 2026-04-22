@@ -27,3 +27,18 @@ data/metadata/*
 
 # Logs
 *.log
+
+# Environment / secrets — NEVER commit API keys
+.env
+.env.*
+!.env.example
+
+# Generated reports (large self-contained HTML files)
+reports/*.html
+
+# Final H3 panel data (large Parquet files)
+data/h3_panel/*
+!data/h3_panel/.gitkeep
+
+# Raw parquet files anywhere
+*.parquet
